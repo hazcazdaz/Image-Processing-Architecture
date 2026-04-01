@@ -1,0 +1,9 @@
+# Compiled CUDA binary
+gaussian_blur
+
+# Uploaded/processed images
+images/
+
+# Node
+node_modules
+package-lock.json
