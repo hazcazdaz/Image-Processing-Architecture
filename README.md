@@ -34,3 +34,5 @@ copy ..\cuda_gui.jsx src\App.jsx
 cd cuda-benchmark
 npm run dev
 ```
+
+Then open `http://localhost:5173` in your browser. To stop the server press `Ctrl + C`.
