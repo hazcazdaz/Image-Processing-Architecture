@@ -156,24 +156,74 @@ export default function App() {
     reader.readAsDataURL(file);
   }, []);
 
-  const handleRun = () => {
+  const handleRun = async () => {
     const target = tab === "single" ? selectedFilter : selectedPipeline;
     if (!target || !uploadedFile) return;
     setRunning(true);
     setResults(null);
-    setTimeout(() => {
-      const base = MOCK_RESULTS[tab === "single" ? selectedFilter : "bilateral"];
-      const resFactor = selectedResolution.includes("4K") ? 2.8 : selectedResolution.includes("8K") ? 6.2 : selectedResolution.includes("HD ") ? 0.5 : 1;
-      setResults({
-        gpuTime:    +(base.gpu * resFactor).toFixed(1),
-        cpuTime:    +(base.cpu * resFactor).toFixed(1),
-        transfer:   +(base.transfer).toFixed(1),
-        throughput: Math.round(base.throughput / Math.sqrt(resFactor)),
-        resolution: selectedResolution,
-        filter: tab === "single" ? FILTERS.find(f => f.id === selectedFilter)?.name : PIPELINES.find(p => p.id === selectedPipeline)?.name,
-      });
-      setRunning(false);
-    }, 1800);
+
+    const isGaussian = tab === "single" && (selectedFilter === "gaussian_3" || selectedFilter === "gaussian_31");
+    const isGrayscale = tab === "single" && selectedFilter === "grayscale";
+    const isSobel = tab === "single" && selectedFilter === "sobel";
+
+    if (isGaussian || isGrayscale || isSobel) {
+      // Real CUDA backend call
+      const formData = new FormData();
+      formData.append("image", uploadedFile);
+
+      let endpoint;
+      if (isGaussian) {
+        endpoint = "http://localhost:3001/api/benchmark";
+        const kernelSize = selectedFilter === "gaussian_3" ? 3 : 31;
+        formData.append("kernelSize", kernelSize);
+      } else if (isSobel) {
+        endpoint = "http://localhost:3001/api/sobel";
+      } else {
+        endpoint = "http://localhost:3001/api/grayscale";
+      }
+
+      try {
+        const resp = await fetch(endpoint, {
+          method: "POST",
+          body: formData,
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || "Backend error");
+
+        setResults({
+          gpuTime: data.gpuTime,
+          cpuTime: data.cpuTime,
+          globalTime: data.globalTime,
+          sharedTime: data.sharedTime,
+          transfer: data.transfer,
+          throughput: data.throughput,
+          resolution: `${data.width}x${data.height}`,
+          filter: FILTERS.find(f => f.id === selectedFilter)?.name,
+          outputImage: data.outputImage,
+          real: true,
+        });
+      } catch (err) {
+        console.error("Backend error:", err);
+        setResults({ error: err.message });
+      } finally {
+        setRunning(false);
+      }
+    } else {
+      // Mock data for other filters
+      setTimeout(() => {
+        const base = MOCK_RESULTS[tab === "single" ? selectedFilter : "bilateral"];
+        const resFactor = selectedResolution.includes("4K") ? 2.8 : selectedResolution.includes("8K") ? 6.2 : selectedResolution.includes("HD ") ? 0.5 : 1;
+        setResults({
+          gpuTime:    +(base.gpu * resFactor).toFixed(1),
+          cpuTime:    +(base.cpu * resFactor).toFixed(1),
+          transfer:   +(base.transfer).toFixed(1),
+          throughput: Math.round(base.throughput / Math.sqrt(resFactor)),
+          resolution: selectedResolution,
+          filter: tab === "single" ? FILTERS.find(f => f.id === selectedFilter)?.name : PIPELINES.find(p => p.id === selectedPipeline)?.name,
+        });
+        setRunning(false);
+      }, 1800);
+    }
   };
 
   const toggleCompare = (id) => {
@@ -311,7 +361,7 @@ export default function App() {
           <div style={S.title}>CUDA Benchmark Tool</div>
           <div style={S.subtitle}>Digital Image Processing · ECEN 489</div>
         </div>
-        <div style={S.badge}>PROGRESS DEMO · NO BACKEND</div>
+        <div style={S.badge}>CUDA BACKEND · GRAYSCALE, GAUSSIAN BLUR & SOBEL LIVE</div>
       </div>
 
       <div style={S.main}>
@@ -539,12 +589,28 @@ export default function App() {
             </div>
           )}
 
-          {results && !running && (
+          {results && !running && results.error && (
+            <div style={{ ...S.card, borderColor: "#FF4D6D44" }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#FF4D6D", marginBottom: 6 }}>Benchmark Failed</div>
+              <div style={{ fontSize: 13, color: "#8BA8C0" }}>{results.error}</div>
+              <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 8 }}>Make sure the backend server is running: cd backend && node server.js</div>
+            </div>
+          )}
+
+          {results && !running && !results.error && (
             <>
               <div style={{ ...S.card, borderColor: "#00D4FF22" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
                   <div>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>Benchmark Results</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>Benchmark Results</div>
+                      {results.real && (
+                        <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: "#00E5A022", color: "#00E5A0", border: "1px solid #00E5A055", fontWeight: 700 }}>LIVE CUDA</span>
+                      )}
+                      {!results.real && (
+                        <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: "#FF8C4222", color: "#FF8C42", border: "1px solid #FF8C4255", fontWeight: 700 }}>MOCK DATA</span>
+                      )}
+                    </div>
                     <div style={{ fontSize: 12, color: "#8BA8C0", marginTop: 2 }}>{results.filter} · {results.resolution}</div>
                   </div>
                   <div style={{
@@ -562,18 +628,81 @@ export default function App() {
                   <MetricCard label="Transfer Overhead" gpu={results.transfer} cpu="N/A" unit="ms" />
                   <MetricCard label="Throughput" gpu={results.throughput} cpu={Math.round(results.throughput / (results.cpuTime / results.gpuTime))} unit="MP/s" />
                 </div>
+
+                {/* Global vs Shared memory breakdown for real results */}
+                {results.real && (results.globalTime > 0 || results.sharedTime > 0) && (
+                  <div style={{ marginTop: 16, padding: "12px 14px", background: "rgba(0,212,255,0.04)", borderRadius: 8, border: "1px solid #00D4FF22" }}>
+                    <div style={{ fontSize: 11, color: "#8BA8C0", fontFamily: "monospace", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>GPU Memory Strategy Breakdown</div>
+                    <div style={{ display: "flex", gap: 24 }}>
+                      <div>
+                        <div style={{ fontSize: 11, color: "#FF8C42", marginBottom: 2 }}>Global Memory</div>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", fontFamily: "monospace" }}>
+                          {results.globalTime > 0 ? results.globalTime.toFixed(3) : "N/A"}<span style={{ fontSize: 11, color: "#8BA8C0", marginLeft: 3 }}>ms</span>
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, color: "#00E5A0", marginBottom: 2 }}>Shared Memory</div>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", fontFamily: "monospace" }}>
+                          {results.sharedTime > 0 ? results.sharedTime.toFixed(3) : "N/A"}<span style={{ fontSize: 11, color: "#8BA8C0", marginLeft: 3 }}>ms</span>
+                        </div>
+                      </div>
+                      {results.globalTime > 0 && results.sharedTime > 0 && (
+                        <div>
+                          <div style={{ fontSize: 11, color: "#BF00FF", marginBottom: 2 }}>Shared Speedup</div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: "#BF00FF", fontFamily: "monospace" }}>
+                            {(results.globalTime / results.sharedTime).toFixed(1)}×
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* Simulated speedup chart across resolutions */}
-              <div style={S.card}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", marginBottom: 14 }}>Projected Speedup by Resolution</div>
-                <SpeedupBar label="HD (720p)" value={+(results.cpuTime / results.gpuTime * 0.6).toFixed(1)} max={20} />
-                <SpeedupBar label="Full HD (1080p)" value={+(results.cpuTime / results.gpuTime).toFixed(1)} max={20} />
-                <SpeedupBar label="4K UHD" value={+(results.cpuTime / results.gpuTime * 1.8).toFixed(1)} max={20} />
-                <SpeedupBar label="8K UHD" value={Math.min(+(results.cpuTime / results.gpuTime * 3.2).toFixed(1), 20)} max={20} />
-                <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 10 }}>
-                  Note: GPU speedup scales super-linearly with resolution as parallelism is better utilized.
+              {/* Output image preview for real results */}
+              {results.real && results.outputImage && (
+                <div style={S.card}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", marginBottom: 12 }}>Processed Output</div>
+                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: "#8BA8C0", marginBottom: 6 }}>Original</div>
+                      <img src={uploadedPreview} alt="original" style={{ maxWidth: 300, maxHeight: 220, borderRadius: 8, border: "1px solid #ffffff11" }} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 11, color: "#00D4FF", marginBottom: 6 }}>{results.filter} Output</div>
+                      <img src={results.outputImage} alt="processed" style={{ maxWidth: 300, maxHeight: 220, borderRadius: 8, border: "1px solid #00D4FF44" }} />
+                    </div>
+                  </div>
                 </div>
+              )}
+
+              {/* Speedup chart */}
+              <div style={S.card}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", marginBottom: 14 }}>
+                  {results.real ? "Measured Speedup" : "Projected Speedup by Resolution"}
+                </div>
+                {results.real ? (
+                  <>
+                    <SpeedupBar label="GPU (Global)" value={results.globalTime > 0 ? +(results.cpuTime / results.globalTime).toFixed(1) : 0} max={Math.max(+(results.cpuTime / results.gpuTime).toFixed(0), 20)} />
+                    {results.sharedTime > 0 && (
+                      <SpeedupBar label="GPU (Shared)" value={+(results.cpuTime / results.sharedTime).toFixed(1)} max={Math.max(+(results.cpuTime / results.gpuTime).toFixed(0), 20)} />
+                    )}
+                    <SpeedupBar label="GPU (w/ Transfer)" value={+(results.cpuTime / (results.gpuTime + results.transfer)).toFixed(1)} max={Math.max(+(results.cpuTime / results.gpuTime).toFixed(0), 20)} />
+                    <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 10 }}>
+                      Actual measurements from your GPU on the uploaded image ({results.resolution}).
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <SpeedupBar label="HD (720p)" value={+(results.cpuTime / results.gpuTime * 0.6).toFixed(1)} max={20} />
+                    <SpeedupBar label="Full HD (1080p)" value={+(results.cpuTime / results.gpuTime).toFixed(1)} max={20} />
+                    <SpeedupBar label="4K UHD" value={+(results.cpuTime / results.gpuTime * 1.8).toFixed(1)} max={20} />
+                    <SpeedupBar label="8K UHD" value={Math.min(+(results.cpuTime / results.gpuTime * 3.2).toFixed(1), 20)} max={20} />
+                    <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 10 }}>
+                      Note: GPU speedup scales super-linearly with resolution as parallelism is better utilized.
+                    </div>
+                  </>
+                )}
               </div>
             </>
           )}

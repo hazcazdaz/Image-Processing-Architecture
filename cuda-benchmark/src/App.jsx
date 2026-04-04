@@ -164,17 +164,22 @@ export default function App() {
 
     const isGaussian = tab === "single" && (selectedFilter === "gaussian_3" || selectedFilter === "gaussian_31");
     const isGrayscale = tab === "single" && selectedFilter === "grayscale";
+    const isSobel = tab === "single" && selectedFilter === "sobel";
 
-    if (isGaussian || isGrayscale) {
+    if (isGaussian || isGrayscale || isSobel) {
       // Real CUDA backend call
       const formData = new FormData();
       formData.append("image", uploadedFile);
 
-      let endpoint = "http://localhost:3001/api/grayscale";
+      let endpoint;
       if (isGaussian) {
         endpoint = "http://localhost:3001/api/benchmark";
         const kernelSize = selectedFilter === "gaussian_3" ? 3 : 31;
         formData.append("kernelSize", kernelSize);
+      } else if (isSobel) {
+        endpoint = "http://localhost:3001/api/sobel";
+      } else {
+        endpoint = "http://localhost:3001/api/grayscale";
       }
 
       try {
@@ -356,7 +361,7 @@ export default function App() {
           <div style={S.title}>CUDA Benchmark Tool</div>
           <div style={S.subtitle}>Digital Image Processing · ECEN 489</div>
         </div>
-        <div style={S.badge}>CUDA BACKEND · GRAYSCALE & GAUSSIAN BLUR LIVE</div>
+        <div style={S.badge}>CUDA BACKEND · GRAYSCALE, GAUSSIAN BLUR & SOBEL LIVE</div>
       </div>
 
       <div style={S.main}>

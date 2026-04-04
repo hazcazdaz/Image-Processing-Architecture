@@ -18,6 +18,7 @@ const upload = multer({ dest: uploadDir });
 
 const GAUSSIAN_BINARY = path.join(__dirname, "gaussian_blur");
 const GRAYSCALE_BINARY = path.join(__dirname, "grayscale");
+const SOBEL_BINARY = path.join(__dirname, "sobel");
 
 // Helper: run a CUDA binary, parse JSON output, return result with output image
 function runBenchmark(binary, args, inputPath, outputPath, res) {
@@ -84,6 +85,15 @@ app.post("/api/grayscale", upload.single("image"), (req, res) => {
   const outputPath = inputPath + "_out.png";
 
   runBenchmark(GRAYSCALE_BINARY, [inputPath, outputPath, "ALL"], inputPath, outputPath, res);
+});
+
+// POST /api/sobel
+// Body: multipart form with "image" file
+app.post("/api/sobel", upload.single("image"), (req, res) => {
+  const inputPath = req.file.path;
+  const outputPath = inputPath + "_out.png";
+
+  runBenchmark(SOBEL_BINARY, [inputPath, outputPath, "ALL"], inputPath, outputPath, res);
 });
 
 app.listen(PORT, () => {
