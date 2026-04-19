@@ -1,16 +1,25 @@
 NVCC = nvcc
-TARGETS = gaussian_blur grayscale sobel
+TARGETS = bin/gaussian_blur bin/grayscale bin/sobel bin/median bin/kuwahara
 
-all: $(TARGETS)
+all: bin $(TARGETS)
 
-gaussian_blur: gaussian_blur.cu stb_image.h stb_image_write.h
-	$(NVCC) -o gaussian_blur gaussian_blur.cu -lm
+bin:
+	mkdir -p bin
 
-grayscale: grayscale.cu stb_image.h stb_image_write.h
-	$(NVCC) -o grayscale grayscale.cu -lm
+bin/gaussian_blur: gaussian_blur.cu stb_image.h stb_image_write.h
+	$(NVCC) -o bin/gaussian_blur gaussian_blur.cu -lm
 
-sobel: sobel.cu stb_image.h stb_image_write.h
-	$(NVCC) -o sobel sobel.cu -lm
+bin/grayscale: grayscale.cu stb_image.h stb_image_write.h
+	$(NVCC) -o bin/grayscale grayscale.cu -lm
+
+bin/sobel: sobel.cu stb_image.h stb_image_write.h
+	$(NVCC) -o bin/sobel sobel.cu -lm
+
+bin/median: median.cu stb_image.h stb_image_write.h
+	$(NVCC) -o bin/median median.cu -lm
+
+bin/kuwahara: kuwahara.cu stb_image.h stb_image_write.h
+	$(NVCC) -o bin/kuwahara kuwahara.cu -lm
 
 clean:
-	rm -f $(TARGETS)
+	rm -rf bin

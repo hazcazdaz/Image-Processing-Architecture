@@ -1,7 +1,5 @@
 # Compiled CUDA binary
-gaussian_blur
-grayscale
-sobel
+bin/
 
 # Uploaded/processed images
 images/

@@ -1,64 +1,43 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 const FILTERS = [
   {
     id: "grayscale",
     name: "Grayscale",
-    category: "Baseline",
     desc: "Weighted luminance conversion (R×0.299 + G×0.587 + B×0.114)",
     complexity: "Low",
   },
   {
     id: "gaussian_3",
     name: "Gaussian Blur 3×3",
-    category: "Baseline",
     desc: "Small-kernel separable convolution — minimal GPU advantage",
     complexity: "Low",
   },
   {
     id: "gaussian_31",
     name: "Gaussian Blur 31×31",
-    category: "Baseline",
     desc: "Large-kernel separable convolution — significant GPU speedup expected",
     complexity: "Medium",
   },
   {
     id: "sobel",
     name: "Sobel Edge Detection",
-    category: "Baseline",
     desc: "Horizontal + vertical gradient magnitude across all pixels",
     complexity: "Low",
   },
   {
-    id: "bilateral",
-    name: "Bilateral Filter",
-    category: "Complex",
-    desc: "Edge-preserving smoothing — spatially & range-weighted per pixel",
-    complexity: "High",
-  },
-  {
-    id: "nlm",
-    name: "Non-Local Means",
-    category: "Complex",
-    desc: "Patch-based denoising — O(n²) per pixel, GPU critical",
-    complexity: "Very High",
-  },
-  {
-    id: "unsharp",
-    name: "Unsharp Masking",
-    category: "Complex",
-    desc: "Blur subtraction + sharpening in two chained passes",
+    id: "median",
+    name: "Median Filter",
+    desc: "3×3 median — removes salt & pepper noise while preserving edges",
     complexity: "Medium",
   },
+  {
+    id: "kuwahara",
+    name: "Kuwahara Filter",
+    desc: "Painterly smoothing — picks the lowest-variance quadrant mean per pixel",
+    complexity: "High",
+  },
 ];
-
-const PIPELINES = [
-  { id: "pipe1", name: "Edge Pipeline", steps: ["Grayscale", "Gaussian 31×31", "Sobel"] },
-  { id: "pipe2", name: "Denoise & Sharpen", steps: ["Bilateral", "Unsharp Masking", "Threshold"] },
-  { id: "pipe3", name: "Full Enhancement", steps: ["NLM Denoise", "Sharpen", "Edge Enhance"] },
-];
-
-const RESOLUTIONS = ["HD (1280×720)", "Full HD (1920×1080)", "4K UHD (3840×2160)", "8K UHD (7680×4320)"];
 
 const complexityColor = {
   Low: "#00D4FF",
@@ -126,23 +105,29 @@ const MOCK_RESULTS = {
   gaussian_3:   { gpu: 3.4,  cpu: 22.1,  transfer: 0.8,  throughput: 550 },
   gaussian_31:  { gpu: 8.2,  cpu: 210.3, transfer: 0.8,  throughput: 228 },
   sobel:        { gpu: 4.1,  cpu: 31.7,  transfer: 0.8,  throughput: 452 },
-  bilateral:    { gpu: 12.4, cpu: 680.2, transfer: 0.8,  throughput: 150 },
-  nlm:          { gpu: 48.2, cpu: 9820.4,transfer: 0.8,  throughput: 39  },
-  unsharp:      { gpu: 9.8,  cpu: 145.6, transfer: 0.8,  throughput: 190 },
+  median:       { gpu: 3.8,  cpu: 28.5,  transfer: 0.8,  throughput: 490 },
+  kuwahara:     { gpu: 11.6, cpu: 520.3, transfer: 0.8,  throughput: 160 },
 };
 
 export default function App() {
   const [tab, setTab] = useState("single"); // single | pipeline | compare
   const [selectedFilter, setSelectedFilter] = useState(null);
-  const [selectedPipeline, setSelectedPipeline] = useState(null);
-  const [selectedResolution, setSelectedResolution] = useState(RESOLUTIONS[1]);
+  const [pipelineSteps, setPipelineSteps] = useState([]);
   const [dragOver, setDragOver] = useState(false);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [uploadedPreview, setUploadedPreview] = useState(null);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState(null);
   const [compareFilters, setCompareFilters] = useState([]);
+  const [systemInfo, setSystemInfo] = useState({ cpu: null, gpu: null });
   const fileInputRef = useRef();
+
+  useEffect(() => {
+    fetch("http://localhost:3001/api/system-info")
+      .then(r => r.json())
+      .then(data => setSystemInfo(data))
+      .catch(() => {});
+  }, []);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -157,30 +142,123 @@ export default function App() {
   }, []);
 
   const handleRun = async () => {
-    const target = tab === "single" ? selectedFilter : selectedPipeline;
+    const target = tab === "single" ? selectedFilter : (tab === "pipeline" ? pipelineSteps.length > 0 : true);
     if (!target || !uploadedFile) return;
     setRunning(true);
     setResults(null);
 
-    const isGaussian = tab === "single" && (selectedFilter === "gaussian_3" || selectedFilter === "gaussian_31");
-    const isGrayscale = tab === "single" && selectedFilter === "grayscale";
-    const isSobel = tab === "single" && selectedFilter === "sobel";
+    const LIVE_FILTERS = ["grayscale", "gaussian_3", "gaussian_31", "sobel", "median", "kuwahara"];
+    const ENDPOINT_MAP = {
+      grayscale: "http://localhost:3001/api/grayscale",
+      gaussian_3: "http://localhost:3001/api/benchmark",
+      gaussian_31: "http://localhost:3001/api/benchmark",
+      sobel: "http://localhost:3001/api/sobel",
+      median: "http://localhost:3001/api/median",
+      kuwahara: "http://localhost:3001/api/kuwahara",
+    };
 
-    if (isGaussian || isGrayscale || isSobel) {
-      // Real CUDA backend call
+    // --- Compare mode ---
+    if (tab === "compare" && compareFilters.length > 0) {
+      const compareResults = [];
+
+      try {
+        const promises = compareFilters.map(async (filterId) => {
+          const formData = new FormData();
+          formData.append("image", uploadedFile);
+          const endpoint = ENDPOINT_MAP[filterId];
+
+          if (filterId === "gaussian_3") formData.append("kernelSize", 3);
+          if (filterId === "gaussian_31") formData.append("kernelSize", 31);
+
+          const resp = await fetch(endpoint, { method: "POST", body: formData });
+          const data = await resp.json();
+          if (!resp.ok) throw new Error(data.error || `Backend error for ${filterId}`);
+
+          const gpuTime = data.sharedTime > 0 ? data.sharedTime : data.globalTime;
+          return {
+            filterId,
+            filterName: FILTERS.find(f => f.id === filterId)?.name || filterId,
+            gpuTime: data.gpuTime,
+            cpuTime: data.cpuTime,
+            globalTime: data.globalTime,
+            sharedTime: data.sharedTime,
+            transfer: data.transfer,
+            throughput: data.throughput,
+            resolution: `${data.width}x${data.height}`,
+            outputImage: data.outputImage,
+          };
+        });
+
+        const all = await Promise.all(promises);
+        setResults({ compare: true, items: all, real: true });
+      } catch (err) {
+        console.error("Compare error:", err);
+        setResults({ error: err.message });
+      } finally {
+        setRunning(false);
+      }
+      return;
+    }
+
+    // --- Pipeline mode ---
+    if (tab === "pipeline" && pipelineSteps.length > 0) {
+      // Check all steps have live backends
+      const allLive = pipelineSteps.every(id => LIVE_FILTERS.includes(id));
+      if (!allLive) {
+        const missing = pipelineSteps.filter(id => !LIVE_FILTERS.includes(id)).map(id => FILTERS.find(f => f.id === id)?.name);
+        setResults({ error: `No CUDA backend for: ${missing.join(", ")}. Only Grayscale, Gaussian Blur, Sobel, Median, and Kuwahara are supported.` });
+        setRunning(false);
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("image", uploadedFile);
+      formData.append("steps", JSON.stringify(pipelineSteps));
+
+      try {
+        const resp = await fetch("http://localhost:3001/api/pipeline", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || "Backend error");
+
+        setResults({
+          gpuTime: data.totals.gpuTime,
+          cpuTime: data.totals.cpuTime,
+          globalTime: data.totals.globalTime,
+          sharedTime: data.totals.sharedTime,
+          transfer: data.totals.transfer,
+          throughput: data.totals.throughput,
+          resolution: `${data.width}x${data.height}`,
+          filter: "Custom Pipeline",
+          outputImage: data.outputImage,
+          real: true,
+          pipeline: true,
+          steps: data.steps.map(s => ({
+            ...s,
+            filterName: FILTERS.find(f => f.id === s.filterId)?.name || s.filterId,
+          })),
+        });
+      } catch (err) {
+        console.error("Pipeline error:", err);
+        setResults({ error: err.message });
+      } finally {
+        setRunning(false);
+      }
+      return;
+    }
+
+    // --- Single filter mode ---
+    const isLive = tab === "single" && LIVE_FILTERS.includes(selectedFilter);
+
+    if (isLive) {
       const formData = new FormData();
       formData.append("image", uploadedFile);
 
-      let endpoint;
-      if (isGaussian) {
-        endpoint = "http://localhost:3001/api/benchmark";
-        const kernelSize = selectedFilter === "gaussian_3" ? 3 : 31;
-        formData.append("kernelSize", kernelSize);
-      } else if (isSobel) {
-        endpoint = "http://localhost:3001/api/sobel";
-      } else {
-        endpoint = "http://localhost:3001/api/grayscale";
-      }
+      const endpoint = ENDPOINT_MAP[selectedFilter];
+      if (selectedFilter === "gaussian_3") formData.append("kernelSize", 3);
+      if (selectedFilter === "gaussian_31") formData.append("kernelSize", 31);
 
       try {
         const resp = await fetch(endpoint, {
@@ -209,17 +287,17 @@ export default function App() {
         setRunning(false);
       }
     } else {
-      // Mock data for other filters
+      // Mock data for unsupported filters
       setTimeout(() => {
-        const base = MOCK_RESULTS[tab === "single" ? selectedFilter : "bilateral"];
-        const resFactor = selectedResolution.includes("4K") ? 2.8 : selectedResolution.includes("8K") ? 6.2 : selectedResolution.includes("HD ") ? 0.5 : 1;
+        const base = MOCK_RESULTS[selectedFilter] || MOCK_RESULTS["bilateral"];
+        const resFactor = 1;
         setResults({
           gpuTime:    +(base.gpu * resFactor).toFixed(1),
           cpuTime:    +(base.cpu * resFactor).toFixed(1),
           transfer:   +(base.transfer).toFixed(1),
           throughput: Math.round(base.throughput / Math.sqrt(resFactor)),
-          resolution: selectedResolution,
-          filter: tab === "single" ? FILTERS.find(f => f.id === selectedFilter)?.name : PIPELINES.find(p => p.id === selectedPipeline)?.name,
+          resolution: "uploaded image",
+          filter: FILTERS.find(f => f.id === selectedFilter)?.name,
         });
         setRunning(false);
       }, 1800);
@@ -261,16 +339,6 @@ export default function App() {
     },
     title: { fontSize: 16, fontWeight: 700, color: "#fff", letterSpacing: 0.5 },
     subtitle: { fontSize: 12, color: "#8BA8C0", marginLeft: 2 },
-    badge: {
-      marginLeft: "auto",
-      fontSize: 11,
-      background: "#00D4FF15",
-      border: "1px solid #00D4FF44",
-      color: "#00D4FF",
-      padding: "3px 10px",
-      borderRadius: 20,
-      letterSpacing: 0.5,
-    },
     main: { display: "flex", flex: 1, overflow: "hidden" },
     sidebar: {
       width: 300,
@@ -349,8 +417,6 @@ export default function App() {
     }),
   };
 
-  const baseline = FILTERS.filter(f => f.category === "Baseline");
-  const complex = FILTERS.filter(f => f.category === "Complex");
 
   return (
     <div style={S.root}>
@@ -361,7 +427,20 @@ export default function App() {
           <div style={S.title}>CUDA Benchmark Tool</div>
           <div style={S.subtitle}>Digital Image Processing · ECEN 489</div>
         </div>
-        <div style={S.badge}>CUDA BACKEND · GRAYSCALE, GAUSSIAN BLUR & SOBEL LIVE</div>
+        {(systemInfo.cpu || systemInfo.gpu) && (
+          <div style={{ marginLeft: "auto", display: "flex", gap: 16, alignItems: "center" }}>
+            {systemInfo.cpu && (
+              <div style={{ fontSize: 11, color: "#8BA8C0" }}>
+                <span style={{ color: "#FF8C42", fontWeight: 700, marginRight: 4 }}>CPU</span>{systemInfo.cpu}
+              </div>
+            )}
+            {systemInfo.gpu && (
+              <div style={{ fontSize: 11, color: "#8BA8C0" }}>
+                <span style={{ color: "#00E5A0", fontWeight: 700, marginRight: 4 }}>GPU</span>{systemInfo.gpu}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div style={S.main}>
@@ -369,7 +448,7 @@ export default function App() {
         <div style={S.sidebar}>
           <div style={S.tabBar}>
             {["single", "pipeline", "compare"].map(t => (
-              <div key={t} style={S.tab(tab === t)} onClick={() => { setTab(t); setResults(null); setSelectedFilter(null); setSelectedPipeline(null); }}>
+              <div key={t} style={S.tab(tab === t)} onClick={() => { setTab(t); setResults(null); setSelectedFilter(null); setPipelineSteps([]); }}>
                 {t === "single" ? "Single Filter" : t === "pipeline" ? "Pipelines" : "Compare"}
               </div>
             ))}
@@ -378,15 +457,8 @@ export default function App() {
           <div style={{ flex: 1, overflowY: "auto" }}>
             {tab === "single" && (
               <>
-                <div style={S.sectionLabel}>Baseline Filters</div>
-                {baseline.map(f => (
-                  <div key={f.id} style={S.filterItem(selectedFilter === f.id)} onClick={() => { setSelectedFilter(f.id); setResults(null); }}>
-                    <span style={S.filterName(selectedFilter === f.id)}>{f.name}</span>
-                    <span style={S.chip(complexityColor[f.complexity])}>{f.complexity}</span>
-                  </div>
-                ))}
-                <div style={S.sectionLabel}>Complex Filters</div>
-                {complex.map(f => (
+                <div style={S.sectionLabel}>Filters</div>
+                {FILTERS.map(f => (
                   <div key={f.id} style={S.filterItem(selectedFilter === f.id)} onClick={() => { setSelectedFilter(f.id); setResults(null); }}>
                     <span style={S.filterName(selectedFilter === f.id)}>{f.name}</span>
                     <span style={S.chip(complexityColor[f.complexity])}>{f.complexity}</span>
@@ -397,15 +469,37 @@ export default function App() {
 
             {tab === "pipeline" && (
               <>
-                <div style={S.sectionLabel}>Filter Pipelines</div>
-                {PIPELINES.map(p => (
-                  <div key={p.id} style={S.filterItem(selectedPipeline === p.id)} onClick={() => { setSelectedPipeline(p.id); setResults(null); }}>
-                    <div>
-                      <div style={S.filterName(selectedPipeline === p.id)}>{p.name}</div>
-                      <div style={{ fontSize: 10, color: "#8BA8C0", marginTop: 3 }}>{p.steps.join(" → ")}</div>
-                    </div>
+                <div style={S.sectionLabel}>Add Filters to Pipeline</div>
+                {FILTERS.map(f => (
+                  <div key={f.id} style={S.filterItem(false)} onClick={() => { setPipelineSteps(prev => [...prev, f.id]); setResults(null); }}>
+                    <span style={S.filterName(false)}>{f.name}</span>
+                    <span style={{ fontSize: 16, color: "#00D4FF", cursor: "pointer", fontWeight: 700 }}>+</span>
                   </div>
                 ))}
+                {pipelineSteps.length > 0 && (
+                  <>
+                    <div style={S.sectionLabel}>Current Pipeline</div>
+                    {pipelineSteps.map((stepId, i) => {
+                      const f = FILTERS.find(x => x.id === stepId);
+                      return (
+                        <div key={i} style={{ ...S.filterItem(true), gap: 8 }}>
+                          <span style={{ fontSize: 11, color: "#00D4FF", fontFamily: "monospace", fontWeight: 700, width: 18, flexShrink: 0 }}>{i + 1}.</span>
+                          <span style={{ ...S.filterName(true), flex: 1 }}>{f?.name}</span>
+                          <span
+                            style={{ fontSize: 14, color: "#FF4D6D", cursor: "pointer", fontWeight: 700, padding: "0 4px" }}
+                            onClick={(e) => { e.stopPropagation(); setPipelineSteps(prev => prev.filter((_, j) => j !== i)); setResults(null); }}
+                          >×</span>
+                        </div>
+                      );
+                    })}
+                    <div
+                      style={{ padding: "8px 16px", fontSize: 11, color: "#FF4D6D", cursor: "pointer", textAlign: "center" }}
+                      onClick={() => { setPipelineSteps([]); setResults(null); }}
+                    >
+                      Clear All
+                    </div>
+                  </>
+                )}
               </>
             )}
 
@@ -431,31 +525,6 @@ export default function App() {
             )}
           </div>
 
-          {/* Resolution selector */}
-          <div style={{ padding: "12px 16px", borderTop: "1px solid #ffffff0a" }}>
-            <div style={{ fontSize: 10, color: "#8BA8C0", letterSpacing: 1.5, marginBottom: 8, textTransform: "uppercase" }}>Resolution</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {RESOLUTIONS.map(r => (
-                <div
-                  key={r}
-                  onClick={() => setSelectedResolution(r)}
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: 6,
-                    cursor: "pointer",
-                    background: selectedResolution === r ? "rgba(0,212,255,0.12)" : "transparent",
-                    color: selectedResolution === r ? "#00D4FF" : "#8BA8C0",
-                    fontSize: 12,
-                    fontWeight: selectedResolution === r ? 700 : 400,
-                    border: `1px solid ${selectedResolution === r ? "#00D4FF44" : "transparent"}`,
-                    transition: "all 0.15s",
-                  }}
-                >
-                  {r}
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
 
         {/* Main content */}
@@ -513,10 +582,9 @@ export default function App() {
                       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
                         <span style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>{f.name}</span>
                         <span style={S.chip(complexityColor[f.complexity])}>{f.complexity} complexity</span>
-                        <span style={S.chip("#8BA8C0")}>{f.category}</span>
                       </div>
                       <div style={{ fontSize: 13, color: "#8BA8C0", lineHeight: 1.6 }}>{f.desc}</div>
-                      <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 8 }}>Target: {selectedResolution}</div>
+                      <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 8 }}>Upload an image and run the benchmark</div>
                     </div>
                     <button
                       style={S.btn(!uploadedFile || running)}
@@ -531,30 +599,28 @@ export default function App() {
             </div>
           )}
 
-          {tab === "pipeline" && selectedPipeline && (
+          {tab === "pipeline" && pipelineSteps.length > 0 && (
             <div style={S.card}>
-              {(() => {
-                const p = PIPELINES.find(x => x.id === selectedPipeline);
-                return (
-                  <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 16, fontWeight: 700, color: "#fff", marginBottom: 8 }}>{p.name}</div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        {p.steps.map((s, i) => (
-                          <span key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 12, background: "#1B3A6B", padding: "3px 10px", borderRadius: 6, color: "#C0D8E8" }}>{s}</span>
-                            {i < p.steps.length - 1 && <span style={{ color: "#00D4FF", fontSize: 12 }}>→</span>}
-                          </span>
-                        ))}
-                      </div>
-                      <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 8 }}>Target: {selectedResolution} · GPU transfer amortized across all stages</div>
-                    </div>
-                    <button style={S.btn(!uploadedFile || running)} disabled={!uploadedFile || running} onClick={handleRun}>
-                      {running ? "Running…" : "▶  Run Pipeline"}
-                    </button>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: "#fff", marginBottom: 8 }}>Custom Pipeline ({pipelineSteps.length} {pipelineSteps.length === 1 ? "step" : "steps"})</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    {pipelineSteps.map((stepId, i) => {
+                      const f = FILTERS.find(x => x.id === stepId);
+                      return (
+                        <span key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 12, background: "#1B3A6B", padding: "3px 10px", borderRadius: 6, color: "#C0D8E8" }}>{f?.name}</span>
+                          {i < pipelineSteps.length - 1 && <span style={{ color: "#00D4FF", fontSize: 12 }}>→</span>}
+                        </span>
+                      );
+                    })}
                   </div>
-                );
-              })()}
+                  <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 8 }}>GPU transfer amortized across all stages</div>
+                </div>
+                <button style={S.btn(!uploadedFile || running)} disabled={!uploadedFile || running} onClick={handleRun}>
+                  {running ? "Running…" : "▶  Run Pipeline"}
+                </button>
+              </div>
             </div>
           )}
 
@@ -597,7 +663,90 @@ export default function App() {
             </div>
           )}
 
-          {results && !running && !results.error && (
+          {/* Compare results */}
+          {results && !running && !results.error && results.compare && (
+            <>
+              {/* Speedup comparison chart */}
+              <div style={{ ...S.card, borderColor: "#00D4FF22" }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#fff", marginBottom: 4 }}>Speedup Comparison</div>
+                <div style={{ fontSize: 12, color: "#8BA8C0", marginBottom: 16 }}>{results.items.length} filters · {results.items[0]?.resolution}</div>
+                {(() => {
+                  const maxSpeedup = Math.max(...results.items.map(r => r.cpuTime / r.gpuTime), 1);
+                  return results.items.map((r) => (
+                    <SpeedupBar key={r.filterId} label={r.filterName} value={+(r.cpuTime / r.gpuTime).toFixed(1)} max={Math.max(maxSpeedup, 2)} />
+                  ));
+                })()}
+              </div>
+
+              {/* Per-filter detail cards */}
+              <div style={{ display: "grid", gridTemplateColumns: results.items.length <= 2 ? "1fr 1fr" : "1fr 1fr", gap: 16 }}>
+                {results.items.map((r) => {
+                  const speedup = (r.cpuTime / r.gpuTime).toFixed(1);
+                  return (
+                    <div key={r.filterId} style={{ ...S.card, borderColor: "#00D4FF22" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>{r.filterName}</div>
+                        <div style={{ fontSize: 24, fontWeight: 900, color: "#00D4FF", fontFamily: "monospace" }}>
+                          {speedup}×
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                          <span style={{ color: "#00E5A0" }}>GPU</span>
+                          <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{r.gpuTime} ms</span>
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                          <span style={{ color: "#FF8C42" }}>CPU</span>
+                          <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{r.cpuTime} ms</span>
+                        </div>
+                        {r.globalTime > 0 && (
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                            <span style={{ color: "#8BA8C0" }}>Global</span>
+                            <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{r.globalTime} ms</span>
+                          </div>
+                        )}
+                        {r.sharedTime > 0 && (
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                            <span style={{ color: "#8BA8C0" }}>Shared</span>
+                            <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{r.sharedTime} ms</span>
+                          </div>
+                        )}
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                          <span style={{ color: "#8BA8C0" }}>Transfer</span>
+                          <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{r.transfer} ms</span>
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                          <span style={{ color: "#8BA8C0" }}>Throughput</span>
+                          <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{r.throughput} MP/s</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Output images comparison */}
+              {results.items.some(r => r.outputImage) && (
+                <div style={S.card}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", marginBottom: 12 }}>Output Comparison</div>
+                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: "#8BA8C0", marginBottom: 6 }}>Original</div>
+                      <img src={uploadedPreview} alt="original" style={{ maxWidth: 220, maxHeight: 180, borderRadius: 8, border: "1px solid #ffffff11" }} />
+                    </div>
+                    {results.items.map((r) => r.outputImage && (
+                      <div key={r.filterId}>
+                        <div style={{ fontSize: 11, color: "#00D4FF", marginBottom: 6 }}>{r.filterName}</div>
+                        <img src={r.outputImage} alt={r.filterName} style={{ maxWidth: 220, maxHeight: 180, borderRadius: 8, border: "1px solid #00D4FF44" }} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {results && !running && !results.error && !results.compare && (
             <>
               <div style={{ ...S.card, borderColor: "#00D4FF22" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -629,35 +778,55 @@ export default function App() {
                   <MetricCard label="Throughput" gpu={results.throughput} cpu={Math.round(results.throughput / (results.cpuTime / results.gpuTime))} unit="MP/s" />
                 </div>
 
-                {/* Global vs Shared memory breakdown for real results */}
-                {results.real && (results.globalTime > 0 || results.sharedTime > 0) && (
-                  <div style={{ marginTop: 16, padding: "12px 14px", background: "rgba(0,212,255,0.04)", borderRadius: 8, border: "1px solid #00D4FF22" }}>
-                    <div style={{ fontSize: 11, color: "#8BA8C0", fontFamily: "monospace", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>GPU Memory Strategy Breakdown</div>
-                    <div style={{ display: "flex", gap: 24 }}>
-                      <div>
-                        <div style={{ fontSize: 11, color: "#FF8C42", marginBottom: 2 }}>Global Memory</div>
-                        <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", fontFamily: "monospace" }}>
-                          {results.globalTime > 0 ? results.globalTime.toFixed(3) : "N/A"}<span style={{ fontSize: 11, color: "#8BA8C0", marginLeft: 3 }}>ms</span>
-                        </div>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 11, color: "#00E5A0", marginBottom: 2 }}>Shared Memory</div>
-                        <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", fontFamily: "monospace" }}>
-                          {results.sharedTime > 0 ? results.sharedTime.toFixed(3) : "N/A"}<span style={{ fontSize: 11, color: "#8BA8C0", marginLeft: 3 }}>ms</span>
-                        </div>
-                      </div>
-                      {results.globalTime > 0 && results.sharedTime > 0 && (
-                        <div>
-                          <div style={{ fontSize: 11, color: "#BF00FF", marginBottom: 2 }}>Shared Speedup</div>
-                          <div style={{ fontSize: 18, fontWeight: 700, color: "#BF00FF", fontFamily: "monospace" }}>
-                            {(results.globalTime / results.sharedTime).toFixed(1)}×
+              </div>
+
+              {/* Pipeline per-step breakdown */}
+              {results.pipeline && results.steps && (
+                <div style={S.card}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", marginBottom: 14 }}>Pipeline Step Breakdown</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {results.steps.map((step, i) => {
+                      const stepSpeedup = step.cpuTime && step.gpuTime ? (step.cpuTime / step.gpuTime).toFixed(1) : "—";
+                      return (
+                        <div key={i} style={{
+                          background: "rgba(255,255,255,0.03)",
+                          border: "1px solid #ffffff11",
+                          borderRadius: 8,
+                          padding: "12px 14px",
+                        }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                            <span style={{ fontSize: 12, fontWeight: 700, color: "#00D4FF", fontFamily: "monospace" }}>Step {i + 1}</span>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{step.filterName}</span>
+                            <span style={{ marginLeft: "auto", fontSize: 16, fontWeight: 800, color: "#00D4FF", fontFamily: "monospace" }}>{stepSpeedup}×</span>
+                          </div>
+                          <div style={{ display: "flex", gap: 20, fontSize: 12 }}>
+                            <div>
+                              <span style={{ color: "#00E5A0" }}>GPU </span>
+                              <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{step.gpuTime} ms</span>
+                            </div>
+                            <div>
+                              <span style={{ color: "#FF8C42" }}>CPU </span>
+                              <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{step.cpuTime} ms</span>
+                            </div>
+                            {step.globalTime > 0 && (
+                              <div>
+                                <span style={{ color: "#8BA8C0" }}>Global </span>
+                                <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{step.globalTime} ms</span>
+                              </div>
+                            )}
+                            {step.sharedTime > 0 && (
+                              <div>
+                                <span style={{ color: "#8BA8C0" }}>Shared </span>
+                                <span style={{ color: "#fff", fontFamily: "monospace", fontWeight: 600 }}>{step.sharedTime} ms</span>
+                              </div>
+                            )}
                           </div>
                         </div>
-                      )}
-                    </div>
+                      );
+                    })}
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
               {/* Output image preview for real results */}
               {results.real && results.outputImage && (
@@ -708,7 +877,7 @@ export default function App() {
           )}
 
           {/* Empty state */}
-          {!selectedFilter && !selectedPipeline && compareFilters.length === 0 && !results && (
+          {!selectedFilter && pipelineSteps.length === 0 && compareFilters.length === 0 && !results && (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, opacity: 0.5 }}>
               <div style={{ fontSize: 48 }}>⚡</div>
               <div style={{ fontSize: 16, color: "#8BA8C0" }}>Select a filter from the sidebar to get started</div>
