@@ -4,61 +4,59 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#include <omp.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-// Max kernel size we support for shared memory path
+// Max kernel size we support
 #define MAX_RADIUS 15
 #define MAX_KERNEL_SIZE (2 * MAX_RADIUS + 1)
 
-// Shared memory tiling config (used when kernel radius <= MAX_RADIUS)
-#define TILE_WIDTH 22
-#define BLOCK_WIDTH_SHARED(r) (TILE_WIDTH + 2 * (r))
+#define TILE_WIDTH 16
+#define BLOCK_SIZE 16
 
-// Constant memory for shared memory filter
+// Constant memory for filter kernel
 __constant__ float c_Filter[MAX_KERNEL_SIZE][MAX_KERNEL_SIZE];
 
-// Shared memory kernel — uses dynamic sizing via template-like approach
-// For simplicity, we fix the shared tile to the max possible size
+// Shared memory kernel — fixed 16×16 block, cooperative halo loading
 __global__ void gaussianBlurShared(unsigned char* in, unsigned char* out,
-                                    int Width, int Height, int channels,
-                                    int radius, int blockW) {
-    extern __shared__ float ds_in[];
+                                    int width, int height, int channels,
+                                    int radius) {
+    // Dynamic shared memory: blockW * blockW floats per channel pass
+    extern __shared__ float tile[];
 
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
     int tx = threadIdx.x;
     int ty = threadIdx.y;
+    int x = blockIdx.x * TILE_WIDTH + tx;
+    int y = blockIdx.y * TILE_WIDTH + ty;
 
-    int Row = by * TILE_WIDTH + ty - radius;
-    int Col = bx * TILE_WIDTH + tx - radius;
+    int blockW = TILE_WIDTH + 2 * radius;
 
     for (int c = 0; c < channels; ++c) {
-        if (Row >= 0 && Row < Height && Col >= 0 && Col < Width) {
-            ds_in[ty * blockW + tx] = in[(Row * Width + Col) * channels + c];
-        } else {
-            ds_in[ty * blockW + tx] = 0.0f;
+        // Cooperatively load tile + halo — each thread may load multiple elements
+        for (int dy = ty; dy < blockW; dy += TILE_WIDTH) {
+            for (int dx = tx; dx < blockW; dx += TILE_WIDTH) {
+                int gx = blockIdx.x * TILE_WIDTH + dx - radius;
+                int gy = blockIdx.y * TILE_WIDTH + dy - radius;
+                gx = min(max(gx, 0), width - 1);
+                gy = min(max(gy, 0), height - 1);
+                tile[dy * blockW + dx] = (float)in[(gy * width + gx) * channels + c];
+            }
         }
         __syncthreads();
 
-        if (ty >= radius && ty < blockW - radius &&
-            tx >= radius && tx < blockW - radius) {
-            float Pvalue = 0.0f;
-            for (int i = -radius; i <= radius; ++i) {
-                for (int j = -radius; j <= radius; ++j) {
-                    Pvalue += ds_in[(ty + i) * blockW + (tx + j)] * c_Filter[i + radius][j + radius];
+        if (x < width && y < height) {
+            float sum = 0.0f;
+            for (int ky = -radius; ky <= radius; ky++) {
+                for (int kx = -radius; kx <= radius; kx++) {
+                    sum += tile[(ty + radius + ky) * blockW + (tx + radius + kx)]
+                           * c_Filter[ky + radius][kx + radius];
                 }
             }
-
-            int outRow = by * TILE_WIDTH + (ty - radius);
-            int outCol = bx * TILE_WIDTH + (tx - radius);
-
-            if (outRow < Height && outCol < Width) {
-                out[(outRow * Width + outCol) * channels + c] = (unsigned char)Pvalue;
-            }
+            out[(y * width + x) * channels + c] = (unsigned char)min(max(sum, 0.0f), 255.0f);
         }
         __syncthreads();
     }
@@ -96,6 +94,7 @@ void gaussianBlurCPU(unsigned char* input, unsigned char* output,
                      int width, int height, int channels,
                      float* kernel, int kernelSize) {
     int radius = kernelSize / 2;
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             for (int c = 0; c < channels; c++) {
@@ -181,10 +180,10 @@ int main(int argc, char** argv) {
 
     // --- CPU ---
     if (runCPU) {
-        clock_t start = clock();
+        double start = omp_get_wtime();
         gaussianBlurCPU(h_input, h_output, width, height, channels, h_kernel, kernelSize);
-        clock_t end = clock();
-        cpuTimeMs = (double)(end - start) / CLOCKS_PER_SEC * 1000.0;
+        double end = omp_get_wtime();
+        cpuTimeMs = (end - start) * 1000.0;
     }
 
     // --- GPU setup ---
@@ -225,14 +224,12 @@ int main(int argc, char** argv) {
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
             cudaFree(d_kernel);
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) fprintf(stderr, "gaussianBlurGlobal: %s\n", cudaGetErrorString(err));
         }
 
         // --- Shared memory ---
-        // Only use shared memory when block dimensions fit within 1024 thread limit
-        int blockW = TILE_WIDTH + 2 * radius;
-        int canRunShared = runShared && (blockW * blockW <= 1024);
-
-        if (canRunShared) {
+        if (runShared) {
             float h_filter[MAX_KERNEL_SIZE][MAX_KERNEL_SIZE] = {0};
             for (int y = 0; y < kernelSize; y++) {
                 for (int x = 0; x < kernelSize; x++) {
@@ -241,27 +238,27 @@ int main(int argc, char** argv) {
             }
             cudaMemcpyToSymbol(c_Filter, h_filter, sizeof(h_filter));
 
-            dim3 blockSize(blockW, blockW);
-            dim3 gridSize((width + TILE_WIDTH - 1) / TILE_WIDTH,
-                          (height + TILE_WIDTH - 1) / TILE_WIDTH);
+            int blockW = TILE_WIDTH + 2 * radius;
+            dim3 sharedBlock(TILE_WIDTH, TILE_WIDTH);
+            dim3 sharedGrid((width + TILE_WIDTH - 1) / TILE_WIDTH,
+                            (height + TILE_WIDTH - 1) / TILE_WIDTH);
             size_t sharedMemSize = blockW * blockW * sizeof(float);
 
             cudaEvent_t start, stop;
             cudaEventCreate(&start);
             cudaEventCreate(&stop);
             cudaEventRecord(start);
-            gaussianBlurShared<<<gridSize, blockSize, sharedMemSize>>>(d_input, d_output, width, height, channels, radius, blockW);
+            gaussianBlurShared<<<sharedGrid, sharedBlock, sharedMemSize>>>(d_input, d_output, width, height, channels, radius);
             cudaEventRecord(stop);
             cudaEventSynchronize(stop);
             cudaEventElapsedTime(&sharedTimeMs, start, stop);
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
-
-            cudaMemcpy(h_output, d_output, imageBytes, cudaMemcpyDeviceToHost);
-        } else if (runGlobal) {
-            cudaMemcpy(h_output, d_output, imageBytes, cudaMemcpyDeviceToHost);
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) fprintf(stderr, "gaussianBlurShared: %s\n", cudaGetErrorString(err));
         }
 
+        cudaMemcpy(h_output, d_output, imageBytes, cudaMemcpyDeviceToHost);
         cudaFree(d_input);
         cudaFree(d_output);
     }

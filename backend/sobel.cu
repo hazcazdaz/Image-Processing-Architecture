@@ -4,6 +4,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <omp.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -123,6 +124,7 @@ void sobelCPU(unsigned char* input, unsigned char* output,
     int Gx[3][3] = {{-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1}};
     int Gy[3][3] = {{-1, -2, -1}, {0, 0, 0}, {1, 2, 1}};
 
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             float gx = 0.0f, gy = 0.0f;
@@ -194,10 +196,10 @@ int main(int argc, char** argv) {
 
     // --- CPU ---
     if (runCPU) {
-        clock_t start = clock();
+        double start = omp_get_wtime();
         sobelCPU(h_input, h_output, width, height, channels);
-        clock_t end = clock();
-        cpuTimeMs = (double)(end - start) / CLOCKS_PER_SEC * 1000.0;
+        double end = omp_get_wtime();
+        cpuTimeMs = (end - start) * 1000.0;
     }
 
     // --- GPU setup ---
@@ -234,6 +236,8 @@ int main(int argc, char** argv) {
             cudaEventElapsedTime(&globalTimeMs, start, stop);
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) fprintf(stderr, "sobelGlobal: %s\n", cudaGetErrorString(err));
         }
 
         // --- Shared memory ---
@@ -252,6 +256,8 @@ int main(int argc, char** argv) {
             cudaEventElapsedTime(&sharedTimeMs, start, stop);
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) fprintf(stderr, "sobelShared: %s\n", cudaGetErrorString(err));
         }
 
         cudaMemcpy(h_output, d_output, imageBytes, cudaMemcpyDeviceToHost);

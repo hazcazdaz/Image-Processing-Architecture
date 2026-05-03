@@ -46,8 +46,8 @@ const complexityColor = {
   "Very High": "#BF00FF",
 };
 
-function MetricCard({ label, gpu, cpu, unit = "ms", highlight = false }) {
-  const speedup = cpu && gpu ? (cpu / gpu).toFixed(1) : null;
+function MetricCard({ label, gpu, cpu, unit = "ms", highlight = false, noSpeedup = false }) {
+  const speedup = !noSpeedup && cpu && gpu ? (cpu / gpu).toFixed(1) : null;
   return (
     <div
       style={{
@@ -68,12 +68,14 @@ function MetricCard({ label, gpu, cpu, unit = "ms", highlight = false }) {
             {gpu ?? "—"}<span style={{ fontSize: 12, color: "#8BA8C0", marginLeft: 3 }}>{unit}</span>
           </div>
         </div>
-        <div>
-          <div style={{ fontSize: 11, color: "#FF8C42", marginBottom: 2 }}>CPU</div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: "#fff", fontFamily: "monospace" }}>
-            {cpu ?? "—"}<span style={{ fontSize: 12, color: "#8BA8C0", marginLeft: 3 }}>{unit}</span>
+        {cpu !== undefined && (
+          <div>
+            <div style={{ fontSize: 11, color: "#FF8C42", marginBottom: 2 }}>CPU</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: "#fff", fontFamily: "monospace" }}>
+              {cpu ?? "—"}<span style={{ fontSize: 12, color: "#8BA8C0", marginLeft: 3 }}>{unit}</span>
+            </div>
           </div>
-        </div>
+        )}
         {speedup && (
           <div style={{ marginLeft: "auto", textAlign: "right" }}>
             <div style={{ fontSize: 11, color: "#8BA8C0", marginBottom: 2 }}>Speedup</div>
@@ -774,8 +776,8 @@ export default function App() {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <MetricCard label="Execution Time" gpu={results.gpuTime} cpu={results.cpuTime} unit="ms" highlight />
                   <MetricCard label="Effective (w/ Transfer)" gpu={+(results.gpuTime + results.transfer).toFixed(1)} cpu={results.cpuTime} unit="ms" />
-                  <MetricCard label="Transfer Overhead" gpu={results.transfer} cpu="N/A" unit="ms" />
-                  <MetricCard label="Throughput" gpu={results.throughput} cpu={Math.round(results.throughput / (results.cpuTime / results.gpuTime))} unit="MP/s" />
+                  <MetricCard label="Transfer Overhead" gpu={results.transfer} unit="ms" />
+                  <MetricCard label="Throughput" gpu={results.throughput?.toFixed(1)} cpu={(results.throughput / (results.cpuTime / results.gpuTime)).toFixed(1)} unit="MP/s" noSpeedup />
                 </div>
 
               </div>
@@ -845,34 +847,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Speedup chart */}
-              <div style={S.card}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", marginBottom: 14 }}>
-                  {results.real ? "Measured Speedup" : "Projected Speedup by Resolution"}
-                </div>
-                {results.real ? (
-                  <>
-                    <SpeedupBar label="GPU (Global)" value={results.globalTime > 0 ? +(results.cpuTime / results.globalTime).toFixed(1) : 0} max={Math.max(+(results.cpuTime / results.gpuTime).toFixed(0), 20)} />
-                    {results.sharedTime > 0 && (
-                      <SpeedupBar label="GPU (Shared)" value={+(results.cpuTime / results.sharedTime).toFixed(1)} max={Math.max(+(results.cpuTime / results.gpuTime).toFixed(0), 20)} />
-                    )}
-                    <SpeedupBar label="GPU (w/ Transfer)" value={+(results.cpuTime / (results.gpuTime + results.transfer)).toFixed(1)} max={Math.max(+(results.cpuTime / results.gpuTime).toFixed(0), 20)} />
-                    <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 10 }}>
-                      Actual measurements from your GPU on the uploaded image ({results.resolution}).
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <SpeedupBar label="HD (720p)" value={+(results.cpuTime / results.gpuTime * 0.6).toFixed(1)} max={20} />
-                    <SpeedupBar label="Full HD (1080p)" value={+(results.cpuTime / results.gpuTime).toFixed(1)} max={20} />
-                    <SpeedupBar label="4K UHD" value={+(results.cpuTime / results.gpuTime * 1.8).toFixed(1)} max={20} />
-                    <SpeedupBar label="8K UHD" value={Math.min(+(results.cpuTime / results.gpuTime * 3.2).toFixed(1), 20)} max={20} />
-                    <div style={{ fontSize: 11, color: "#ffffff33", marginTop: 10 }}>
-                      Note: GPU speedup scales super-linearly with resolution as parallelism is better utilized.
-                    </div>
-                  </>
-                )}
-              </div>
             </>
           )}
 

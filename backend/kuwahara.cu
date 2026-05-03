@@ -4,6 +4,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <omp.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -195,6 +196,7 @@ void kuwaharaCPU(unsigned char* input, unsigned char* output,
                  int width, int height, int channels) {
     int R = KUWAHARA_RADIUS;
 
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             float bestVar = 1e30f;
@@ -270,10 +272,10 @@ int main(int argc, char** argv) {
 
     // --- CPU ---
     if (runCPU) {
-        clock_t start = clock();
+        double start = omp_get_wtime();
         kuwaharaCPU(h_input, h_output, width, height, channels);
-        clock_t end = clock();
-        cpuTimeMs = (double)(end - start) / CLOCKS_PER_SEC * 1000.0;
+        double end = omp_get_wtime();
+        cpuTimeMs = (end - start) * 1000.0;
     }
 
     // --- GPU setup ---
@@ -310,6 +312,8 @@ int main(int argc, char** argv) {
             cudaEventElapsedTime(&globalTimeMs, start, stop);
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) fprintf(stderr, "kuwaharaGlobal: %s\n", cudaGetErrorString(err));
         }
 
         // --- Shared memory ---
@@ -328,6 +332,8 @@ int main(int argc, char** argv) {
             cudaEventElapsedTime(&sharedTimeMs, start, stop);
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) fprintf(stderr, "kuwaharaShared: %s\n", cudaGetErrorString(err));
         }
 
         cudaMemcpy(h_output, d_output, imageBytes, cudaMemcpyDeviceToHost);

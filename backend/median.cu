@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <omp.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -105,6 +106,7 @@ __global__ void medianShared(unsigned char* input, unsigned char* output,
 // CPU implementation
 void medianCPU(unsigned char* input, unsigned char* output,
                int width, int height, int channels) {
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             for (int c = 0; c < 3 && c < channels; c++) {
@@ -171,10 +173,10 @@ int main(int argc, char** argv) {
 
     // --- CPU ---
     if (runCPU) {
-        clock_t start = clock();
+        double start = omp_get_wtime();
         medianCPU(h_input, h_output, width, height, channels);
-        clock_t end = clock();
-        cpuTimeMs = (double)(end - start) / CLOCKS_PER_SEC * 1000.0;
+        double end = omp_get_wtime();
+        cpuTimeMs = (end - start) * 1000.0;
     }
 
     // --- GPU setup ---
@@ -211,6 +213,8 @@ int main(int argc, char** argv) {
             cudaEventElapsedTime(&globalTimeMs, start, stop);
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) fprintf(stderr, "medianGlobal: %s\n", cudaGetErrorString(err));
         }
 
         // --- Shared memory ---
@@ -229,6 +233,8 @@ int main(int argc, char** argv) {
             cudaEventElapsedTime(&sharedTimeMs, start, stop);
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) fprintf(stderr, "medianShared: %s\n", cudaGetErrorString(err));
         }
 
         cudaMemcpy(h_output, d_output, imageBytes, cudaMemcpyDeviceToHost);
